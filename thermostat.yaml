@@ -1,0 +1,178 @@
+substitutions:
+  device_name: thermostat
+  friendly_name: Thermostat
+
+esphome:
+  name: ${device_name}
+
+esp8266:
+  board: esp01_1m
+
+logger:
+
+api:
+  encryption:
+    key: !secret enc_key
+
+ota:
+  password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+i2c:
+  sda: GPIO4 #D2
+  scl: GPIO5 #D1
+  scan: False
+
+sensor:
+  # temp, pressure, humidity sensor
+  # this uses i2c
+  - platform: bme280
+    temperature:
+      name: ${friendly_name} Inside Temperature
+      id: bme280_temperature
+      oversampling: 1x
+    pressure:
+      name: ${friendly_name} Pressure
+      id: bme280_pressure
+      oversampling: 1x
+    humidity:
+      name: ${friendly_name} Relative Humidity
+      id: bme280_humidity
+      oversampling: 1x
+    address: 0x76
+    update_interval: 60s
+  - platform: template
+    name: ${friendly_name} Altitude
+    lambda: |-
+      const float STANDARD_SEA_LEVEL_PRESSURE = 1013.25; //in hPa, see note
+      return ((id(bme280_temperature).state + 273.15) / 0.0065) *
+        (powf((STANDARD_SEA_LEVEL_PRESSURE / id(bme280_pressure).state), 0.190234) - 1); // in meter
+    update_interval: 60s
+    icon: 'mdi:signal'
+    unit_of_measurement: 'm'
+  - platform: template
+    name: ${friendly_name} Absolute Humidity
+    lambda: |-
+      const float mw = 18.01534;    // molar mass of water g/mol
+      const float r = 8.31447215;   // Universal gas constant J/mol/K
+      return (6.112 * powf(2.718281828, (17.67 * id(bme280_temperature).state) /
+        (id(bme280_temperature).state + 243.5)) * id(bme280_humidity).state * mw) /
+        ((273.15 + id(bme280_temperature).state) * r); // in grams/m^3
+    accuracy_decimals: 2
+    update_interval: 60s
+    icon: 'mdi:water'
+    unit_of_measurement: 'g/m³'
+  - platform: template
+    name: ${friendly_name} Dew Point
+    lambda: |-
+      return (243.5*(log(id(bme280_humidity).state/100)+((17.67*id(bme280_temperature).state)/
+      (243.5+id(bme280_temperature).state)))/(17.67-log(id(bme280_humidity).state/100)-
+      ((17.67*id(bme280_temperature).state)/(243.5+id(bme280_temperature).state))));
+    unit_of_measurement: °C
+    update_interval: 60s
+    icon: 'mdi:thermometer-alert'
+
+  # pull temp from home assistant for other sensor
+  - platform: homeassistant
+    id: inside_temperature
+    name: Inside Temperature
+    internal: True
+    entity_id: sensor.inside_temperature
+  - platform: template
+    id: inside_temperature_c
+    name: Inside Temperature C
+    internal: True
+    unit_of_measurement: °C
+    accuracy_decimals: 1
+    lambda: |-
+        return (id(inside_temperature).state - 32.0) * (5.0/9.0);
+
+  # combine temp sensors if possible to provide a better average for the house
+  - platform: template
+    id: temperature_average
+    name: ${friendly_name} Temperature Average
+    device_class: temperature
+    state_class: measurement
+    unit_of_measurement: °C
+    accuracy_decimals: 1
+    lambda: |-
+        float sum = 0;
+        uint16_t cnt = 0;
+        if (  (!std::isnan(id(bme280_temperature).state)) && (id(bme280_temperature).state > 5) && (id(bme280_temperature).state < 30)  ) {
+          sum += id(bme280_temperature).state;
+          cnt += 1;
+        }
+        if (  (!std::isnan(id(inside_temperature_c).state)) && (id(inside_temperature_c).state > 5) && (id(inside_temperature_c).state < 30)  ) {
+          sum += id(inside_temperature_c).state;
+          cnt += 1;
+        }
+        if (cnt == 0) {
+          return NAN;
+        } else {
+          return (sum / cnt);
+        }
+    update_interval: 5s
+
+  # particulate sensor
+  - platform: sps30
+    pm_1_0:
+      name: "${friendly_name} PM <1µm Weight concentration"
+      id: "${device_name}_PM_1_0"
+    pm_2_5:
+      name: "${friendly_name} PM <2.5µm Weight concentration"
+      id: "${device_name}_PM_2_5"
+    pm_4_0:
+      name: "${friendly_name} PM <4µm Weight concentration"
+      id: "${device_name}_PM_4_0"
+    pm_10_0:
+      name: "${friendly_name} PM <10µm Weight concentration"
+      id: "${device_name}_PM_10_0"
+    pmc_0_5:
+      name: "${friendly_name} PM <0.5µm Number concentration"
+      id: "${device_name}_PMC_0_5"
+    pmc_1_0:
+      name: "${friendly_name} PM <1µm Number concentration"
+      id: "${device_name}_PMC_1_0"
+    pmc_2_5:
+      name: "${friendly_name} PM <2.5µm Number concentration"
+      id: "${device_name}_PMC_2_5"
+    pmc_4_0:
+      name: "${friendly_name} PM <4µm Number concentration"
+      id: "${device_name}_PMC_4_0"
+    pmc_10_0:
+      name: "${friendly_name} PM <10µm Number concentration"
+      id: "${device_name}_PMC_10_0"
+    pm_size:
+      name: "${friendly_name} Typical Particle size"
+      id: "${device_name}_pm_size"
+    address: 0x69
+    update_interval: 10s
+
+# heater relay
+switch:
+  - platform: gpio
+    id: heater_relay
+    name: ${friendly_name} Heater Relay
+    pin: GPIO14 #D5
+
+# climate controller
+climate:
+  - platform: thermostat
+    name: ${friendly_name} Climate Controller
+    sensor: temperature_average
+    min_heating_off_time: 300s
+    min_heating_run_time: 300s
+    min_idle_time: 30s
+    heat_action:
+      - switch.turn_on: heater_relay
+    idle_action:
+      - switch.turn_off: heater_relay
+    default_preset: home
+    preset:
+      - name: home
+        default_target_temperature_low: 20
+      - name: sleep
+        default_target_temperature_low: 15.5
